@@ -1,0 +1,21 @@
+# Line endings are normalised to LF in the repository.
+#
+# This exists because of a specific failure rather than as boilerplate: the
+# work happens on Windows, where git's autocrlf would check build.sh out with
+# CRLF endings. A shell script with CRLF fails on Linux with a message that
+# names neither the carriage return nor the script -- bash reads `#!/usr/bin/env
+# bash\r` and reports that the interpreter does not exist.
+* text=auto eol=lf
+
+# Executable text where the endings are not negotiable.
+*.sh text eol=lf
+
+# Source and docs.
+*.java text eol=lf diff=java
+*.md text eol=lf
+*.yml text eol=lf
+*.json text eol=lf
+
+# Journal fixtures are byte-exact: a line-ending rewrite would change the
+# CRC of every record and make a recovery test fail for the wrong reason.
+*.journal binary
