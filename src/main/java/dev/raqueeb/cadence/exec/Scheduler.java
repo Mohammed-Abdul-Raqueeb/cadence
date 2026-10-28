@@ -350,6 +350,21 @@ public final class Scheduler implements AutoCloseable {
 
     /** Records an attempt's outcome and decides what happens next. */
     private void complete(Job job, Throwable failure, long elapsedNanos) {
+        try {
+            completeUnderLock(job, failure, elapsedNanos);
+        } finally {
+            // The queue almost certainly changed -- a retry was added, or a
+            // recurring job was requeued -- and this runs on a worker thread
+            // while the scheduling thread is asleep on a wait computed before
+            // any of that. Without this wake a retry due in 200ms waits out
+            // the whole idle ceiling instead, which is how a demo first
+            // showed a retry never happening at all.
+            clock.wake();
+        }
+    }
+
+    /** The body of {@link #complete}, holding the lock. */
+    private void completeUnderLock(Job job, Throwable failure, long elapsedNanos) {
         synchronized (lock) {
             LocalDateTime now = clock.now();
             metrics.histogram("jobs.duration.ms").record(elapsedNanos / 1_000_000);

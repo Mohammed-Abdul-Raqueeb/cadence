@@ -161,6 +161,48 @@ final class SchedulerTest {
         }
     }
 
+    @Test("finishing a job wakes the clock, so a retry is not slept through")
+    static void completionWakesTheClock() {
+        // The bug the CLI demo found, which no stepped test could: a worker
+        // queues a retry while the scheduling thread is already asleep on a
+        // wait computed before that retry existed. Without a wake the retry
+        // waits out the 30-second idle ceiling rather than its 200ms backoff.
+        try (Harness h = harness()) {
+            h.scheduler().register("boom", context -> {
+                throw new IllegalStateException("no");
+            });
+            h.scheduler().submit(JobSpec.forHandler("boom")
+                    .retryPolicy(RetryPolicy.builder()
+                            .maxAttempts(3)
+                            .baseDelay(Duration.ofMillis(200))
+                            .maxDelay(Duration.ofSeconds(1))
+                            .build())
+                    .build());
+
+            int before = h.clock().wakes();
+            h.step();
+
+            isTrue(h.clock().wakes() > before,
+                    "the clock to be woken when a retry is queued");
+        }
+    }
+
+    @Test("a succeeding recurring job also wakes the clock")
+    static void successWakesTheClock() {
+        try (Harness h = harness()) {
+            h.scheduler().register("noop", context -> {
+            });
+            h.scheduler().submit(JobSpec.forHandler("noop").schedule("* * * * *").build());
+            h.clock().advance(Duration.ofMinutes(2));
+
+            int before = h.clock().wakes();
+            h.step();
+
+            isTrue(h.clock().wakes() > before,
+                    "the clock to be woken when a recurring job is requeued");
+        }
+    }
+
     @Test("a null spec is refused")
     static void nullSpecIsRefused() {
         try (Harness h = harness()) {
