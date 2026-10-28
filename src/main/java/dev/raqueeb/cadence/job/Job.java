@@ -142,7 +142,14 @@ public final class Job {
         if (when == null) {
             throw new IllegalArgumentException("a job cannot be rescheduled to no time");
         }
-        moveTo(JobState.SCHEDULED);
+        // Guarded rather than unconditional, because this is called down two
+        // paths that differ. A settled job returning to the queue is a real
+        // transition; moving an already-queued job to a different time is
+        // not, and SCHEDULED -> SCHEDULED is illegal precisely because a
+        // transition to the same state carries no information.
+        if (state != JobState.SCHEDULED) {
+            moveTo(JobState.SCHEDULED);
+        }
         this.nextFireAt = when;
     }
 
