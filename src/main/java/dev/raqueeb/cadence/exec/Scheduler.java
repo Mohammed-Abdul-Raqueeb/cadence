@@ -105,6 +105,26 @@ public final class Scheduler implements AutoCloseable {
     }
 
     /**
+     * Removes a handler, leaving any job that uses it unable to run.
+     *
+     * <p>Here so a handler can be drained before a deployment removes its
+     * code: jobs keep their schedules and are reported at each fire rather
+     * than failing in a way that consumes their retries.
+     *
+     * <p>It is also what makes the "handler is gone" branch in
+     * {@link #fireDueJobs} reachable. A guard rail no caller can trigger is
+     * untestable, and an untestable guard rail is one nobody can show works.
+     *
+     * @param name the handler to remove
+     * @return true when a handler of that name was registered
+     */
+    public boolean unregister(String name) {
+        synchronized (lock) {
+            return handlers.remove(name == null ? "" : name.trim()) != null;
+        }
+    }
+
+    /**
      * Submits a job.
      *
      * @param spec what the job does and when
@@ -237,7 +257,7 @@ public final class Scheduler implements AutoCloseable {
      * @return how long to wait before there is anything else to do
      */
     public Duration fireDueJobs() {
-        List<Runnable> toRun = new ArrayList<>();
+        List<Fire> toRun = new ArrayList<>();
         Duration wait;
 
         synchronized (lock) {
@@ -266,23 +286,40 @@ public final class Scheduler implements AutoCloseable {
                         Map.of("attempt", Long.valueOf(job.attempts())));
                 metrics.counter("jobs.started").increment();
 
-                toRun.add(taskFor(job, handler));
+                toRun.add(new Fire(job, taskFor(job, handler)));
             }
 
             wait = waitUntilNextFire(clock.now());
         }
 
-        for (Runnable task : toRun) {
-            if (!workers.submit(task)) {
-                // The pool refused, so the job cannot run now. Treated as a
-                // failure of this attempt so the retry policy decides what
-                // happens, rather than silently dropping the fire.
+        for (Fire fire : toRun) {
+            if (!workers.submit(fire.task())) {
+                // The pool refused, so this fire cannot run. Completed as a
+                // failed attempt so the retry policy decides what happens
+                // next: the job is already in RUNNING with its attempt
+                // counted, and leaving it there would strand it in a state
+                // nothing else moves it out of.
                 metrics.counter("jobs.rejected").increment();
-                task = null;
+                complete(fire.job(),
+                        new RejectedExecutionException("the worker pool queue is full"), 0L);
             }
         }
 
         return wait;
+    }
+
+    /** A job and the task that will run it, paired so a rejection can be reported. */
+    private record Fire(Job job, Runnable task) {
+    }
+
+    /** Thrown into {@link #complete} when the pool cannot take a fire. */
+    private static final class RejectedExecutionException extends RuntimeException {
+
+        private static final long serialVersionUID = 1L;
+
+        RejectedExecutionException(String message) {
+            super(message);
+        }
     }
 
     /** The work a worker does for one fire. */

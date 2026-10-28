@@ -40,6 +40,17 @@ public final class WorkerPool implements AutoCloseable {
     private final AtomicLong completed = new AtomicLong();
     private final AtomicLong rejected = new AtomicLong();
 
+    /**
+     * Tasks accepted but not yet finished, whether queued or running.
+     *
+     * <p>Incremented before the task is queued and decremented after it
+     * returns, which is what makes it safe to wait on. Queue depth and busy
+     * count both read zero in the window between a worker taking a task and
+     * marking itself busy, so anything waiting for "no outstanding work" on
+     * those two alone can return while a task is about to run.
+     */
+    private final AtomicInteger inFlight = new AtomicInteger();
+
     /** Set once, so workers stop taking new work but still drain the queue. */
     private volatile boolean stopping;
 
@@ -122,6 +133,7 @@ public final class WorkerPool implements AutoCloseable {
             } finally {
                 busy.decrementAndGet();
                 completed.incrementAndGet();
+                inFlight.decrementAndGet();
             }
         }
     }
@@ -142,8 +154,12 @@ public final class WorkerPool implements AutoCloseable {
             return false;
         }
 
+        // Counted before the offer, so the task is never briefly invisible
+        // to inFlightCount(); decremented again if the offer is refused.
+        inFlight.incrementAndGet();
         boolean queued = queue.offer(task);
         if (!queued) {
+            inFlight.decrementAndGet();
             rejected.incrementAndGet();
         }
         return queued;
@@ -198,6 +214,15 @@ public final class WorkerPool implements AutoCloseable {
      */
     public int queueDepth() {
         return queue.size();
+    }
+
+    /**
+     * How many tasks are accepted but not yet finished.
+     *
+     * @return the queued and running count together
+     */
+    public int inFlightCount() {
+        return inFlight.get();
     }
 
     /**
