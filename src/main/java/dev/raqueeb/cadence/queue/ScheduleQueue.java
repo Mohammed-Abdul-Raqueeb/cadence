@@ -40,6 +40,10 @@ public final class ScheduleQueue {
     /** Where each job sits in {@link #heap}, so it can be found without a scan. */
     private final Map<JobId, Integer> positions = new HashMap<>();
 
+    /** Creates an empty queue. */
+    public ScheduleQueue() {
+    }
+
     /**
      * Adds a job.
      *

@@ -20,6 +20,10 @@ public final class Metrics {
     private final Map<String, Counter> counters = new ConcurrentHashMap<>();
     private final Map<String, Histogram> histograms = new ConcurrentHashMap<>();
 
+    /** Creates an empty registry. Metrics appear as they are first recorded. */
+    public Metrics() {
+    }
+
     /**
      * The counter under a name, creating it on first use.
      *

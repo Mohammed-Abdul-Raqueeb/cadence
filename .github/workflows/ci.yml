@@ -1,0 +1,175 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  # Lets a run be started by hand. The push that creates a repository's
+  # default branch does not itself trigger a workflow, so without this a
+  # fresh clone has a CI badge that has never been green.
+  workflow_dispatch:
+
+# A new push to the same branch cancels an in-flight run rather than queueing
+# behind it.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }}, JDK ${{ matrix.java }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # One failing combination should not hide the others, which is the
+      # whole point of running a matrix.
+      fail-fast: false
+      matrix:
+        include:
+          # 21 is the floor: the code uses pattern matching for switch and
+          # record patterns, both of which went final in 21.
+          - os: ubuntu-latest
+            java: '21'
+          - os: ubuntu-latest
+            java: '25'
+          # The other two platforms get one JDK each. The code touches the
+          # filesystem and spawns threads, and both differ enough between
+          # platforms to be worth checking; running the full matrix on all
+          # three would triple the bill for very little more information.
+          - os: windows-latest
+            java: '21'
+          - os: macos-latest
+            java: '21'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install JDK ${{ matrix.java }}
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ matrix.java }}
+
+      - name: Build and test
+        shell: bash
+        run: ./build.sh test
+
+      - name: Package
+        shell: bash
+        run: ./build.sh jar
+
+  dependencies:
+    name: Dependency count is zero
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Assert there is no dependency manifest
+        run: |
+          for manifest in pom.xml build.gradle build.gradle.kts ivy.xml; do
+            if [ -e "$manifest" ]; then
+              echo "found $manifest; this project builds with javac alone"
+              exit 1
+            fi
+          done
+          echo "no dependency manifest, as intended"
+
+      - name: Assert nothing is imported from outside the JDK
+        run: |
+          # Every import must be java.*, javax.* or the project's own
+          # package. Anything else means a dependency arrived.
+          #
+          # sed rather than grep -P: the PCRE flag depends on the locale and
+          # fails outright under a non-UTF-8 one, which made an earlier draft
+          # of this check pass silently on the machine it was written on.
+          grep -rh '^import ' --include='*.java' src/ \
+            | sed -E 's/^import +(static +)?//; s/;.*//' \
+            | grep -vE '^(java|javax)\.' \
+            | grep -vE '^dev\.raqueeb\.cadence\.' \
+            | sort -u > foreign-imports.txt
+          if [ -s foreign-imports.txt ]; then
+            echo "imports from outside the JDK:"
+            cat foreign-imports.txt
+            exit 1
+          fi
+          echo "every import is from the JDK or this project"
+
+  javadoc:
+    name: Documentation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Build the javadoc
+        run: |
+          mkdir -p build
+          find src/main/java -name '*.java' | sed 's/.*/"&"/' > build/main.sources
+          # -Xwerror so a broken @link or a missing @param fails the build
+          # rather than scrolling past.
+          javadoc -quiet -Xdoclint:all -Xwerror \
+            -d build/javadoc "@build/main.sources"
+
+  smoke:
+    name: End-to-end smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Build the jar
+        run: ./build.sh jar
+
+      - name: Exercise the command line
+        run: |
+          set -euo pipefail
+
+          echo "--- version ---"
+          java -jar build/cadence.jar version | grep -q 'cadence 0'
+
+          echo "--- next prints the fires asked for ---"
+          java -jar build/cadence.jar next '0 9 * * MON-FRI' \
+            --count 3 --from 2026-10-28T00:00 | tee next.txt
+          grep -q '2026-10-28T09:00' next.txt
+          test "$(grep -c 'T09:00' next.txt)" = "3"
+
+          echo "--- validate warns about the union rule ---"
+          java -jar build/cadence.jar validate '0 0 1 * MON' | grep -q 'EITHER'
+
+          echo "--- a bad expression is refused, not ignored ---"
+          if java -jar build/cadence.jar next '0 0 * * SMARCH'; then
+            echo "a bad expression should have failed"
+            exit 1
+          fi
+
+          echo "--- the demo runs, retries and journals ---"
+          java -jar build/cadence.jar demo --seconds 3 \
+            --journal ./smoke.journal | tee demo.txt
+          grep -q 'greet ran' demo.txt
+          # The retry is the one that matters: it only succeeds on its second
+          # attempt, so this fails if a retry is ever slept through.
+          grep -q 'flaky succeeded on attempt 2' demo.txt
+
+          echo "--- the journal replays ---"
+          java -jar build/cadence.jar replay ./smoke.journal | tee replay.txt
+          grep -q 'submitted' replay.txt
+          grep -q 'succeeded' replay.txt
+
+          echo "--- a damaged journal is refused ---"
+          sed -i '3s/submitted/cancelled/' ./smoke.journal
+          if java -jar build/cadence.jar replay ./smoke.journal; then
+            echo "a damaged journal should have failed"
+            exit 1
+          fi
+
+          echo "All smoke checks passed."
