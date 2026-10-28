@@ -1,0 +1,18 @@
+# Build output
+build/
+*.class
+*.jar
+
+# Scheduler state written by a local run
+*.journal
+cadence-data/
+
+# Editors
+.idea/
+.vscode/
+*.iml
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
